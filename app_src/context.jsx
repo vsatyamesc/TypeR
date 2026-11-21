@@ -3,6 +3,8 @@ import { parsePageMarker } from "./pageMarker";
 import React from "react";
 import PropTypes from "prop-types";
 import { locale, readStorage, writeToStorage, scrollToLine, scrollToStyle, getUpdateTestConfig, clearUpdateTestConfig, checkUpdate, prefetchUpdateZip, downloadAndInstallUpdate, nativeAlert } from "./utils";
+import { setNetworkDisabled } from "./network";
+import { clearFontViewerMemoryCache } from "./fontViewerApi";
 import { shouldRunUpdateCheck } from "./updateLogic";
 import { getNode, readUxpMigrationState, syncLegacyPanelName } from "./uxpMigration";
 import config from "./config";
@@ -10,6 +12,7 @@ import { getNextLineNumberState } from "./lineNumbering";
 import { CUSTOM_IMAGE_THEME_ID, normalizeCustomThemes, normalizeEditorTheme, setCustomEditorThemes } from "./themePresets";
 import { normalizeBackgroundImage } from "./backgroundImage";
 import { toggleStyleStroke } from "./styleStroke";
+import { normalizeStyleBackgroundColor } from "./styleBackground";
 import { applyThemeState } from "./lib/themeManager";
 import { getDefaultShortcuts, migrateShortcutDefaults } from "./shortcutCommands";
 import { getStoredSelectionLineIndex } from "./multiBubbleHistory";
@@ -39,6 +42,7 @@ import { normalizeSeenFeatureTips, showFeatureTip } from "./featureTips";
 import { normalizeRefontRules } from "./oneClick/refont";
 import { defaultUiLayout, normalizeUiLayout } from "./uiLayout";
 const storage = readStorage();
+setNetworkDisabled(storage.data?.disableNetwork === true);
 // A successful application is the clearest signal that someone is relying on
 // TextShapeR. Five applied suggestions are enough to introduce the learning
 // control without interrupting a first-time user.
@@ -88,6 +92,7 @@ const storeFields = [
   "autoClosePSD",
   "checkUpdates",
   "autoUpdate",
+  "disableNetwork",
   "currentFolderTagPriority",
   "resizeTextBoxOnCenter",
   "images",
@@ -275,6 +280,7 @@ const initialState = {
   autoClosePSD: false,
   checkUpdates: config.checkUpdates,
   autoUpdate: storage.data?.autoUpdate === true,
+  disableNetwork: storage.data?.disableNetwork === true,
   currentFolderTagPriority: storage.data?.currentFolderTagPriority !== false,
   resizeTextBoxOnCenter: false,
   showTips: storage.data?.showTips !== false,
@@ -940,6 +946,9 @@ const baseReducer = (state, action) => {
       }
       stylePayload.sizePresets = normalizeStyleSizePresets(stylePayload);
       Object.assign(stylePayload, normalizeStyleSizePresetWidthConfig(stylePayload));
+      if ("backgroundColor" in stylePayload) {
+        stylePayload.backgroundColor = normalizeStyleBackgroundColor(stylePayload.backgroundColor);
+      }
       const editId = action.id || stylePayload.id;
       const styleExists = state.styles.some((s) => s.id === editId);
       newState.styles = styleExists
@@ -1024,6 +1033,13 @@ const baseReducer = (state, action) => {
 
   case "setAutoUpdate": {
     newState.autoUpdate = !!action.value;
+    break;
+  }
+
+  case "setDisableNetwork": {
+    newState.disableNetwork = !!action.value;
+    setNetworkDisabled(newState.disableNetwork);
+    if (newState.disableNetwork) clearFontViewerMemoryCache();
     break;
   }
 
@@ -1970,9 +1986,17 @@ const ContextProvider = React.memo(function ContextProvider(props) {
       backgroundImage: state.backgroundImage,
     });
   }, [state.editorTheme, state.customThemes, state.backgroundImage]);
+  React.useEffect(() => {
+    const networkDisabled = !!state.disableNetwork;
+    setNetworkDisabled(networkDisabled);
+    if (networkDisabled) clearFontViewerMemoryCache();
+    if (typeof window !== "undefined" && window.typerUXP && typeof window.typerUXP.request === "function") {
+      window.typerUXP.request("setNetworkDisabled", networkDisabled).catch(() => {});
+    }
+  }, [state.disableNetwork]);
   const updateCheckRan = React.useRef(false);
   React.useEffect(() => {
-    if (!state.checkUpdates || updateCheckRan.current) return;
+    if (state.disableNetwork || !state.checkUpdates || updateCheckRan.current) return;
     updateCheckRan.current = true;
     const now = Date.now();
     const updateTestConfig = getUpdateTestConfig();
@@ -2016,8 +2040,8 @@ const ContextProvider = React.memo(function ContextProvider(props) {
       prefetchUpdateZip(data.downloadUrl);
       dispatch({ type: "setModal", modal: "update", data });
     }).catch(error => console.warn("Automatic update check failed:", error));
-  }, [state.checkUpdates, state.autoUpdate]);
-  useUxpPlatformPackage();
+  }, [state.disableNetwork, state.checkUpdates, state.autoUpdate]);
+  useUxpPlatformPackage(state.disableNetwork);
   // A script sent by TypeR Studio with the pages it opens here
   useStudioScript(dispatch, () => stateRef.current);
   // Photoshop's "Auto-Collapse Iconic Panels" closes a panel in an icon dock at every click on the document
